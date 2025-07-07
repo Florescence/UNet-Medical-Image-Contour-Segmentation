@@ -1,40 +1,26 @@
 import argparse
 import logging
 import os
-import random
-import sys
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
-from pathlib import Path
 from torch import optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from PIL import Image
-import numpy as np
 
-import wandb
 from evaluate import evaluate
-from unet import UNet
-from utils.data_loading import BasicDataset, CarvanaDataset
+from unet import UNet_S
+from utils.data_loading import BasicDataset
 from utils.dice_score import dice_loss
-from utils.connected_component_loss import connected_component_loss
 
+data_root = Path('data/data-without-black-shadow')
 dir_checkpoint = Path('./checkpoints/')
-dir_img_train = Path('./data/imgs/train/')
-dir_img_val = Path('./data/imgs/val/')
-dir_mask_train = Path('./data/masks/train/')
-dir_mask_val = Path('./data/masks/val/')
-
-def save_mask_as_png(mask, path, threshold=0.5):
-    """将预测掩码保存为黑白PNG图像"""
-    # 二值化处理
-    mask_binary = (mask > threshold).astype(np.uint8) * 255
-    # 转换为PIL图像并保存
-    img = Image.fromarray(mask_binary)
-    img.save(path)
+dir_img_train = data_root / 'imgs/train'
+dir_img_val = data_root / 'imgs/val'
+dir_mask_train = data_root / 'masks/train'
+dir_mask_val = data_root / 'masks/val'
 
 def train_model(
         model,
@@ -45,7 +31,7 @@ def train_model(
         val_percent: float = 0.1,
         save_checkpoint: bool = True,
         img_scale: float = 0.5,
-        amp: bool = False,
+        amp: bool = True,
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
@@ -93,7 +79,8 @@ def train_model(
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=4, T_mult=2, eta_min=1e-7)
     grad_scaler = torch.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
@@ -104,12 +91,15 @@ def train_model(
         epoch_loss = 0
 
         # 创建当前epoch的预测结果保存目录
-        save_pred = epoch % 5 == 0  # 每5个epoch保存一次预测结果
-        if save_pred:
-            epoch_pred_dir = Path(f'./predictions/epoch_{epoch}')
-            epoch_pred_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            epoch_pred_dir = None
+        # save_pred = epoch % 5 == 0  # 每5个epoch保存一次预测结果
+        # if save_pred:
+        #     epoch_pred_dir = Path(f'./predictions/epoch_{epoch}')
+        #     epoch_pred_dir.mkdir(parents=True, exist_ok=True)
+        # else:
+        #     epoch_pred_dir = None
+
+        epoch_pred_dir = Path(f'./predictions/epoch_{epoch}')
+        epoch_pred_dir.mkdir(parents=True, exist_ok=True)
 
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
@@ -121,24 +111,28 @@ def train_model(
                     'the images are loaded correctly.'
 
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
-                true_masks = true_masks.to(device=device, dtype=torch.float32)
+                true_masks = true_masks.to(device=device, dtype=torch.long)
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     masks_pred = model(images)
                     if model.n_classes == 1:
+                        true_masks //= 2 # 导入时2为前景1为背景
                         # 计算交叉熵损失
                         loss = criterion(masks_pred.squeeze(1), true_masks.float())
                         # 计算Dice损失
                         loss += dice_loss(torch.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                        # 计算连通域惩罚损失
-                        pred_prob = torch.sigmoid(masks_pred.squeeze(1))
-                        cc_loss = connected_component_loss(
-                            pred_prob,
-                            edge_distance=50,
-                            min_area=1000,
-                            penalty_weight=0.1
-                        )
-                        loss += cc_loss
+                        # # 计算连通域惩罚损失
+                        # pred_prob = torch.sigmoid(masks_pred.squeeze(1))
+                        # cc_loss = connected_component_loss(
+                        #     pred_prob,
+                        #     edge_distance=50,
+                        #     min_area=1000,
+                        #     penalty_weight=0.1
+                        # )
+                        # loss += cc_loss
+                        # 计算边界损失
+                        # if epoch > epochs / 2:
+                        #     loss += 0.2 * boundary_loss(masks_pred.squeeze(1), true_masks.float(), edge_width=51, edge_weight=7)
 
                     else:
                         loss = criterion(masks_pred, true_masks)
@@ -147,9 +141,19 @@ def train_model(
                             F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
+                        # if epoch > epochs / 2:
+                        #     progress = min(1.0, (epoch - 25) / 10.0)
+                        #     boundary_weight = progress * 1.0
+                        #     norm_factor = 0.2
+                        #     loss += boundary_weight * norm_factor * boundary_loss(masks_pred, true_masks.float(), edge_width=51, edge_weight=7)
+
+                if torch.isnan(loss).any():
+                    # torch.save(model.state_dict(), 'model_before_nan.pth')
+                    raise RuntimeError("Fatal: NaN loss detected!")
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
+
                 grad_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                 grad_scaler.step(optimizer)
@@ -163,7 +167,9 @@ def train_model(
                 #     'step': global_step,
                 #     'epoch': epoch
                 # })
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+
+                # pbar.set_postfix(**{'loss (batch)': loss.item()})
+                pbar.set_postfix(**{'loss (total)': epoch_loss})
 
                 # Evaluation round
                 # division_step = (n_train // (5 * batch_size))
@@ -178,10 +184,12 @@ def train_model(
                         #     if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                         #         histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score = evaluate(model, val_loader, device, amp, epoch_pred_dir)
+                        val_score, val_score_postprocess, min_val_score = evaluate(model, val_loader, device, amp, epoch_pred_dir)
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
+                        logging.info('Validation Postprocessed Dice score: {}'.format(val_score_postprocess))
+                        logging.info('Validation Min Dice score: {}'.format(min_val_score))
                         # try:
                         #     experiment.log({
                         #         'learning rate': optimizer.param_groups[0]['lr'],
@@ -199,13 +207,16 @@ def train_model(
                         #     pass
 
         if save_checkpoint:
-            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-            state_dict = model.state_dict()
-            state_dict['mask_values'] = train_set.mask_values + val_set.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
-            logging.info(f'Checkpoint {epoch} saved!')
+            if epoch % 5 == 0:
+                Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+                state_dict = model.state_dict()
+                state_dict['mask_values'] = train_set.mask_values + val_set.mask_values
+                torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+                logging.info(f'Checkpoint {epoch} saved!')
 
         torch.cuda.empty_cache()
+
+    torch.save(model.state_dict(), f'model_epoch{epochs}.pth')
 
 
 def get_args():
@@ -218,9 +229,9 @@ def get_args():
     parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
-    parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
+    parser.add_argument('--amp', action='store_true', default=True, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
 
     return parser.parse_args()
 
@@ -236,7 +247,8 @@ if __name__ == '__main__':
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
     # model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
-    model = UNet(n_channels=1, n_classes=1, bilinear=args.bilinear)
+    # model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNet_S(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'
@@ -246,7 +258,8 @@ if __name__ == '__main__':
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)
-        del state_dict['mask_values']
+        if 'mask_values' in state_dict:
+            del state_dict['mask_values']
         model.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 

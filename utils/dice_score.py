@@ -1,5 +1,5 @@
 import torch
-from torch import Tensor
+from torch import Tensor, device
 
 
 def dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, epsilon: float = 1e-6):
@@ -16,6 +16,12 @@ def dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, 
     sets_sum = torch.where(sets_sum == 0, inter, sets_sum)
 
     dice = (inter + epsilon) / (sets_sum + epsilon)
+
+    # # weighted dice (need debugging)
+    # class_weights = torch.tensor([1.0, 1.0, 2.0], device=torch.device('cuda:0'))
+    # class_weights = class_weights / class_weights.sum()
+    # dice = (inter + epsilon) / (sets_sum + epsilon) * class_weights
+
     return dice.mean()
 
 

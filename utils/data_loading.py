@@ -1,18 +1,16 @@
 import logging
-import numpy as np
-import torch
-from PIL import Image
-from functools import lru_cache
 from functools import partial
-from itertools import repeat
 from multiprocessing import Pool
 from os import listdir
 from os.path import splitext, isfile, join
 from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from tqdm import tqdm
-# import albumentations.pytorch as A
-# from albumentations.pytorch import ToTensorV2
+
 
 def load_image(filename):
     ext = splitext(filename)[1]
@@ -37,14 +35,16 @@ def unique_mask_values(idx, mask_dir, mask_suffix):
 
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '_mask'):
+    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '_mask', augment=True):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
         self.scale = scale
         self.mask_suffix = mask_suffix
+        self.augment = augment
 
-        self.ids = [splitext(file)[0] for file in listdir(images_dir) if isfile(join(images_dir, file)) and not file.startswith('.')]
+        self.ids = [splitext(file)[0] for file in listdir(images_dir) if
+                    isfile(join(images_dir, file)) and not file.startswith('.')]
         if not self.ids:
             raise RuntimeError(f'No input file found in {images_dir}, make sure you put your images there')
 
@@ -57,10 +57,10 @@ class BasicDataset(Dataset):
             ))
 
         self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
-        logging.info(f'Unique mask values: {self.mask_values}')
 
     def __len__(self):
-        return len(self.ids)
+        # 若启用增强，数据集大小变为原来的4倍（原始+3种旋转）
+        return len(self.ids) * (4 if self.augment else 1)
 
     @staticmethod
     def preprocess(mask_values, pil_img, scale, is_mask):
@@ -72,13 +72,9 @@ class BasicDataset(Dataset):
 
         if is_mask:
             mask = np.zeros((newH, newW), dtype=np.int8)
-            # for i, v in enumerate(mask_values):
-            #     if img.ndim == 2:
-            #         mask[img == v] = i
-            #     else:
-            #         mask[(img == v).all(-1)] = i
-            mask[img == 255] = 1  # 前景
-            mask[img == 0] = 0  # 背景
+            mask[img == 255] = 2  # 目标轮廓
+            mask[img == 128] = 1  # 背景
+            mask[img == 0] = 0  # 虚影
             return mask
 
         else:
@@ -92,21 +88,43 @@ class BasicDataset(Dataset):
 
             return img
 
+    @staticmethod
+    def rotate_image_and_mask(img, mask, angle):
+        """旋转图像和掩码"""
+        # 旋转图像
+        rotated_img = img.rotate(angle, expand=True)
+        # 旋转掩码（保持标签值不变）
+        rotated_mask = mask.rotate(angle, expand=True)
+        return rotated_img, rotated_mask
+
     def __getitem__(self, idx):
-        name = self.ids[idx]
+        # 计算原始索引和旋转偏移
+        original_idx = idx // 4 if self.augment else idx
+        rotation_idx = idx % 4 if self.augment else 0
+
+        name = self.ids[original_idx]
         mask_file = list(self.mask_dir.glob(name + self.mask_suffix + '.*'))
         img_file = list(self.images_dir.glob(name + '.*'))
 
         assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
         assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
+
         mask = load_image(mask_file[0])
         img = load_image(img_file[0])
 
         assert img.size == mask.size, \
             f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
 
+        # 应用旋转增强
+        if self.augment and rotation_idx > 0:
+            angles = [90, 180, 270]
+            img, mask = self.rotate_image_and_mask(img, mask, angles[rotation_idx - 1])
+
+        # 预处理
         img = self.preprocess(self.mask_values, img, self.scale, is_mask=False)
         mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
+
+        assert np.all(np.logical_or.reduce([mask == v for v in [0, 1, 2]])), "掩码包含非法类别索引"
 
         return {
             'image': torch.as_tensor(img.copy()).float().contiguous(),
@@ -115,5 +133,5 @@ class BasicDataset(Dataset):
 
 
 class CarvanaDataset(BasicDataset):
-    def __init__(self, images_dir, mask_dir, scale=1):
-        super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask')
+    def __init__(self, images_dir, mask_dir, scale=1, augment=True):
+        super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask', augment=augment)
