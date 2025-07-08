@@ -48,7 +48,7 @@ def remove_internal_regions(mask, foreground_value=2, background_values=[0, 1]):
     return processed_mask
 
 
-def postprocess_mask(mask, min_area=50, morph_kernel_size=3):
+def postprocess_mask(mask, min_area=4000, morph_kernel_size=3):
     """
     完整的掩码后处理流程：去除内部区域+形态学操作（直接处理[0,1,2]格式掩码）
 
@@ -86,19 +86,3 @@ def postprocess_mask(mask, min_area=50, morph_kernel_size=3):
     processed_mask[processed_binary == 255] = 2  # 保留大的前景区域
 
     return processed_mask
-
-
-def convert_to_visualization(mask):
-    """
-    将[0,1,2]格式的掩码转换为[0,128,255]的8位灰度图像用于保存
-
-    Args:
-        mask: 输入掩码图像，值为[0,1,2]
-
-    Returns:
-        8位灰度图像，值为[0,128,255]
-    """
-    vis_mask = np.zeros_like(mask, dtype=np.uint8)
-    vis_mask[mask == 1] = 128  # 类别1转为128(灰色)
-    vis_mask[mask == 2] = 255  # 类别2转为255(白色)
-    return vis_mask

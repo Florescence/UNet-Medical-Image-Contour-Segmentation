@@ -11,11 +11,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from evaluate import evaluate
-from unet import UNet_S
+from unet import UNet_S, UNet
+from unet.unet_model import UNet_SA
 from utils.data_loading import BasicDataset
 from utils.dice_score import dice_loss
 
-data_root = Path('data/data-without-black-shadow')
+data_root = Path('data/data-3-classes')
 dir_checkpoint = Path('./checkpoints/')
 dir_img_train = data_root / 'imgs/train'
 dir_img_val = data_root / 'imgs/val'
@@ -36,28 +37,24 @@ def train_model(
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
-    # 1. Create dataset
-    # try:
-    #     dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
-    # except (AssertionError, RuntimeError, IndexError):
-    #     dataset = BasicDataset(dir_img, dir_mask, img_scale)
+    # 1. 创建数据集
     # dataset = BasicDataset(dir_img, dir_mask, img_scale)
     train_set = BasicDataset(dir_img_train, dir_mask_train, img_scale)
     val_set = BasicDataset(dir_img_val, dir_mask_val, img_scale)
 
-    # 2. Split into train / validation partitions
+    # 2. 分割训练/验证集
     # n_val = int(len(dataset) * val_percent)
     # n_train = len(dataset) - n_val
     # train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
-    n_val = len(val_set)
+    # n_val = len(val_set)
     n_train = len(train_set)
 
-    # 3. Create data loaders
+    # 3. 创建数据加载器
     loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
-    # # (Initialize logging)
+    # # 初始化logging
     # experiment = wandb.init(project='U-Net', resume="auto", mode="offline")
     # experiment.config.update(
     #     dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
@@ -76,7 +73,7 @@ def train_model(
         Mixed Precision: {amp}
     ''')
 
-    # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
+    # 4. 设置optimizer, scheduler, loss以及loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
     # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
@@ -85,12 +82,12 @@ def train_model(
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
 
-    # 5. Begin training
+    # 5. 开始训练
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0
 
-        # 创建当前epoch的预测结果保存目录
+        # 创建当前epoch的预测结果保存目录，图片保存逻辑在evaluate.py
         # save_pred = epoch % 5 == 0  # 每5个epoch保存一次预测结果
         # if save_pred:
         #     epoch_pred_dir = Path(f'./predictions/epoch_{epoch}')
@@ -115,8 +112,8 @@ def train_model(
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     masks_pred = model(images)
-                    if model.n_classes == 1:
-                        true_masks //= 2 # 导入时2为前景1为背景
+                    if model.n_classes == 1: # 二分类，对于清晰图像使用，仅区分前景人体和背景非人体
+                        true_masks //= 2 # 导入时2为前景1为背景，需要重置为1为前景0为背景
                         # 计算交叉熵损失
                         loss = criterion(masks_pred.squeeze(1), true_masks.float())
                         # 计算Dice损失
@@ -171,7 +168,7 @@ def train_model(
                 # pbar.set_postfix(**{'loss (batch)': loss.item()})
                 pbar.set_postfix(**{'loss (total)': epoch_loss})
 
-                # Evaluation round
+                # 评估轮次
                 # division_step = (n_train // (5 * batch_size))
                 division_step = n_train // batch_size
                 if division_step > 0:
@@ -207,12 +204,14 @@ def train_model(
                         #     pass
 
         if save_checkpoint:
-            if epoch % 5 == 0:
-                Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-                state_dict = model.state_dict()
-                state_dict['mask_values'] = train_set.mask_values + val_set.mask_values
-                torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
-                logging.info(f'Checkpoint {epoch} saved!')
+            factor = 1 # 保存频率
+            if epoch > epochs * 0.8:
+                if epoch % factor == 0:
+                    Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+                    state_dict = model.state_dict()
+                    state_dict['mask_values'] = train_set.mask_values + val_set.mask_values
+                    torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+                    logging.info(f'Checkpoint {epoch} saved!')
 
         torch.cuda.empty_cache()
 
@@ -243,12 +242,15 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    # Change here to adapt to your data
-    # n_channels=3 for RGB images
-    # n_classes is the number of probabilities you want to get per pixel
-    # model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    # 修改此处以适配数据类型
+    # 对于RGB图像设置n_channels=3
+    # n_classes=每个像素点有几个概率值
+    # # 轻量化UNet
+    # model = UNet_S(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    # # 标准Unet
     # model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
-    model = UNet_S(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    # # UNet + 空间注意力
+    model = UNet_SA(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'

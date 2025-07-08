@@ -31,8 +31,7 @@ def evaluate(net, dataloader, device, amp, epoch_pred_dir=None, postprocess=True
     num_val_batches = len(dataloader)
     dice_score_original = 0
     dice_score_postprocessed = 0
-    min_dice_score = 100
-    class_dice_original = [0, 0, 0]
+    min_dice_score = 10
 
     # 创建后处理保存目录
     postprocessed_dir = None
@@ -109,18 +108,17 @@ def evaluate(net, dataloader, device, amp, epoch_pred_dir=None, postprocess=True
                 # 多分类处理
                 mask_pred_indices = mask_pred.argmax(dim=1)  # [B, H, W]，值为0/1/2
 
-                # 计算每个类别的原始Dice分数
-                for c in range(net.n_classes):
-                    pred_c = (mask_pred_indices == c).float()
-                    true_c = (mask_true == c).float()
-                    class_dice_original[c] += dice_coeff(pred_c, true_c, reduce_batch_first=False)
+                # 仅对目标class求dice
+                c = 2
+                pred_c = (mask_pred_indices == c).float()
+                true_c = (mask_true == c).float()
+                current_dice = dice_coeff(pred_c, true_c, reduce_batch_first=False)
 
-                # 计算原始预测的平均Dice分数
-                current_dice_original = sum(class_dice_original) / len(class_dice_original) - dice_score_original
-                dice_score_original = sum(class_dice_original) / len(class_dice_original)
+                # 注意dice是按batch累加最后取平均
+                dice_score_original += current_dice
 
-                if current_dice_original < min_dice_score:
-                    min_dice_score = current_dice_original
+                if current_dice < min_dice_score:
+                    min_dice_score = current_dice
 
                 # 后处理
                 if postprocess:

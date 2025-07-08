@@ -11,6 +11,8 @@ from torchvision import transforms
 from utils.data_loading import BasicDataset
 from unet import UNet
 from utils.utils import plot_img_and_mask
+from utils.post_process import postprocess_mask  # 导入后处理函数
+
 
 def predict_img(net,
                 full_img,
@@ -47,8 +49,12 @@ def get_args():
     parser.add_argument('--scale', '-s', type=float, default=0.5,
                         help='Scale factor for the input images')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
-    
+    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
+    # 新增后处理相关参数
+    parser.add_argument('--postprocess', '-p', action='store_true', help='Apply post-processing to masks')
+    parser.add_argument('--min-area', type=int, default=4000, help='Minimum area for connected components')
+    parser.add_argument('--morph-kernel', type=int, default=3, help='Kernel size for morphological operations')
+
     return parser.parse_args()
 
 
@@ -106,6 +112,15 @@ if __name__ == '__main__':
                            scale_factor=args.scale,
                            out_threshold=args.mask_threshold,
                            device=device)
+
+        # 应用后处理（如果启用）
+        if args.postprocess:
+            logging.info("Applying post-processing...")
+            mask = postprocess_mask(
+                mask,
+                min_area=args.min_area,
+                morph_kernel_size=args.morph_kernel
+            )
 
         if not args.no_save:
             out_filename = out_files[i]

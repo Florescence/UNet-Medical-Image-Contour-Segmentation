@@ -3,7 +3,7 @@ from torch import Tensor, device
 
 
 def dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, epsilon: float = 1e-6):
-    # Average of Dice coefficient for all batches, or for a single mask
+    # 计算平均Dice分数，可对所有batch或单一mask
     assert input.size() == target.size()
     assert input.dim() == 3 or not reduce_batch_first
     # print(f"input shape: {input.shape}, target shape: {target.shape}")
@@ -17,7 +17,7 @@ def dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, 
 
     dice = (inter + epsilon) / (sets_sum + epsilon)
 
-    # # weighted dice (need debugging)
+    # # weighted dice
     # class_weights = torch.tensor([1.0, 1.0, 2.0], device=torch.device('cuda:0'))
     # class_weights = class_weights / class_weights.sum()
     # dice = (inter + epsilon) / (sets_sum + epsilon) * class_weights
@@ -26,11 +26,11 @@ def dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, 
 
 
 def multiclass_dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, epsilon: float = 1e-6):
-    # Average of Dice coefficient for all classes
+    # 计算多类别平均Dice分数
     return dice_coeff(input.flatten(0, 1), target.flatten(0, 1), reduce_batch_first, epsilon)
 
 
 def dice_loss(input: Tensor, target: Tensor, multiclass: bool = False):
-    # Dice loss (objective to minimize) between 0 and 1
+    # Dice loss (目标最小化) 范围[0, 1]
     fn = multiclass_dice_coeff if multiclass else dice_coeff
     return 1 - fn(input, target, reduce_batch_first=True)
