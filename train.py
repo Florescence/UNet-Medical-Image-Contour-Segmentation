@@ -205,7 +205,7 @@ def train_model(
 
         if save_checkpoint:
             factor = 1 # 保存频率
-            if epoch > epochs * 0.8:
+            if epoch > epochs * 0.2:
                 if epoch % factor == 0:
                     Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
                     state_dict = model.state_dict()
@@ -245,12 +245,12 @@ if __name__ == '__main__':
     # 修改此处以适配数据类型
     # 对于RGB图像设置n_channels=3
     # n_classes=每个像素点有几个概率值
-    # # 轻量化UNet
-    # model = UNet_S(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    # 轻量化UNet
+    model = UNet_S(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     # # 标准Unet
     # model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     # # UNet + 空间注意力
-    model = UNet_SA(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    # model = UNet_SA(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'

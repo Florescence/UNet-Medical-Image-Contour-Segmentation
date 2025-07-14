@@ -3,258 +3,226 @@ import cv2
 import json
 import os
 import argparse
+import logging
+from pathlib import Path
+from typing import List, Dict
 
 
 class MaskProcessor:
-    """处理医学图像掩码并转换为JSON格式的工具类"""
+    """处理医学图像掩码并转换为JSON格式的工具类（覆盖图叠加在原始PNG上）"""
 
-    def __init__(self, mask_dir, output_dir=None, image_width=4267, image_height=4267):
-        """初始化掩码处理器"""
-        self.mask_dir = mask_dir
-        self.output_dir = output_dir or mask_dir
-        self.image_width = image_width
-        self.image_height = image_height
+    def __init__(self, input_path: str, output_path: str = None, sizes_json_path: str = None):
+        """
+        初始化掩码处理器
+        :param input_path: 输入掩码文件或目录路径
+        :param output_path: 输出路径（默认与输入路径一致）
+        :param sizes_json_path: 原始尺寸JSON文件路径（从命令行传入）
+        """
+        self.input_path = Path(input_path)
+        self.output_path = self._get_output_path(output_path)
+        self.sizes_json_path = Path(sizes_json_path) if sizes_json_path else None
+        self.sizes_data = self._load_sizes_data()  # 一次性加载所有尺寸信息
+        self.logger = self._setup_logger()
 
-        # 创建输出目录（如果不存在）
-        os.makedirs(self.output_dir, exist_ok=True)
+    def _setup_logger(self) -> logging.Logger:
+        """配置日志系统"""
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler = logging.StreamHandler()
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        return logger
 
-    @staticmethod
-    def read_raw_image(file_path, width=4267, height=4267, dtype=np.uint16):
-        """读取RAW格式的医学图像"""
-        try:
-            with open(file_path, 'rb') as f:
-                raw_data = f.read()
-            img_data = np.frombuffer(raw_data, dtype=dtype)
-            img_data = img_data[:width * height].reshape((height, width))
-            return img_data
-        except Exception as e:
-            print(f"读取RAW图像失败: {e}")
-            return None
-
-    @staticmethod
-    def convert_to_uint8(img):
-        """将图像转换为uint8格式以便显示或保存"""
-        if img.dtype == np.uint8:
-            return img
-        return cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-
-    def process_mask(self, mask_file, max_points, simplify=True, tolerance=2.0, min_points=10, overlay_raw=True):
-        """处理单个掩码图像并转换为JSON格式"""
-        mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            raise ValueError(f"无法读取掩码图像: {mask_file}")
-
-        base_name = os.path.splitext(os.path.basename(mask_file))[0].replace("_pred_mask", "")
-        image_width = self.image_width
-        image_height = self.image_height
-
-        _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-
-        # 提取轮廓并转换为二维坐标
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = [cnt.squeeze(axis=1) for cnt in contours]  # 转为二维数组 (n, 2)
-
-        json_data = {
-            "version": "1.0.2.799",
-            "imagePath": base_name,
-            "imageData": None,
-            "flags": {},
-            "shapes": [],
-            "imageWidth": image_width,
-            "imageHeight": image_height
-        }
-
-        if not contours:
-            print(f"警告: 未找到轮廓: {mask_file}")
-            return json_data
-
-        for i, contour in enumerate(contours):
-            simplified_contour = self._simplify_contour(contour, max_points, simplify, tolerance, min_points)
-
-            # 使用二维点坐标
-            points = simplified_contour.tolist()
-            json_data["shapes"].append({
-                "label": 1,
-                "labelIndex": 0,
-                "points": points,
-                "shape_type": "polygon",
-                "description": "",
-                "mask": None,
-                "group_id": None,
-                "flags": {}
-            })
-
-        # 叠加轮廓并保存图像
-        if overlay_raw:
-            self._create_overlay_image(contours, base_name, image_width, image_height)
-
-        # 保存JSON文件
-        output_path = os.path.join(self.output_dir, f"{base_name}.json")
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, ensure_ascii=False, indent=2)
-
-        print(f"JSON已保存至: {output_path}")
-        return json_data
-
-    def _simplify_contour(self, contour, max_points, simplify, tolerance, min_points):
-        """简化轮廓点集，平衡精度和点数量"""
-        if simplify:
-            perimeter = cv2.arcLength(contour, closed=True)
-            if perimeter > 0:
-                epsilon = max(0.001, min(0.05, tolerance / 100.0)) * perimeter
-                simplified_contour = cv2.approxPolyDP(contour, epsilon, closed=True)
-
-                if len(simplified_contour) < min_points and len(contour) >= min_points:
-                    step = max(1, len(contour) // min_points)
-                    sampled_points = contour[::step]
-
-                    if len(sampled_points) > 0:
-                        first_point = sampled_points[0]
-                        last_point = sampled_points[-1]
-
-                        if not np.allclose(first_point, last_point, atol=1.0):
-                            sampled_points = np.vstack([sampled_points, first_point])
-
-                    simplified_contour = sampled_points
-            else:
-                simplified_contour = contour
+    def _get_output_path(self, output_path: str = None) -> Path:
+        """确定输出路径（默认与输入路径一致）"""
+        if output_path:
+            return Path(output_path)
+        if self.input_path.is_file():
+            return self.input_path.parent  # 单文件：输出到同目录
         else:
-            distance_weight = 0.2
-            if len(contour) <= max_points:
-                simplified_contour = contour
-            else:
-                # 混合采样策略：距离优先 + 均匀分布
-                distances = np.zeros(len(contour))
-                for j in range(len(contour)):
-                    prev_idx = (j - 1) % len(contour)
-                    curr_idx = j
-                    next_idx = (j + 1) % len(contour)
+            return self.input_path  # 目录：输出到自身
 
-                    p1 = contour[prev_idx]
-                    p2 = contour[curr_idx]
-                    p3 = contour[next_idx]
+    def _load_sizes_data(self) -> Dict:
+        """从指定JSON文件加载所有图像尺寸信息（一次性加载）"""
+        if not self.sizes_json_path or not self.sizes_json_path.exists():
+            raise FileNotFoundError(f"尺寸JSON文件不存在: {self.sizes_json_path}")
 
-                    dist_prev = np.linalg.norm(p2 - p1)
-                    dist_next = np.linalg.norm(p3 - p2)
+        with open(self.sizes_json_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
-                    distances[j] = dist_prev + dist_next
+    def _get_image_size(self, mask_filename: str) -> Dict[str, int]:
+        """从已加载的尺寸数据中获取当前掩码的尺寸"""
+        if mask_filename not in self.sizes_data:
+            raise KeyError(f"JSON中未找到 {mask_filename} 的尺寸信息")
+        return self.sizes_data[mask_filename]
 
-                # 按距离排序
-                distance_indices = np.argsort(distances)[::-1]
-                distance_count = int(max_points * distance_weight)
-                distance_points = distance_indices[:distance_count]
+    def _find_original_png(self, base_name: str) -> Path:
+        """查找与掩码对应的原始PNG图像（优先同目录，再尝试流程目录）"""
+        # 候选路径：优先同目录下的原始PNG
+        png_candidates = [
+            self.output_path / f"{base_name}.png",  # 同目录
+            self.output_path.parent / "1_raw_png" / f"{base_name}.png",  # 流程中的RAW转PNG目录
+            self.input_path.parent / f"{base_name}.png"  # 输入掩码的同目录
+        ]
 
-                # 均匀分布采样
-                uniform_count = max_points - distance_count
-                uniform_step = max(1, len(contour) // uniform_count)
-                uniform_indices = np.arange(0, len(contour), uniform_step)
+        for candidate in png_candidates:
+            if candidate.exists() and candidate.suffix.lower() == '.png':
+                return candidate
+        return None
 
-                # 合并采样结果并去重
-                all_indices = np.unique(np.concatenate([distance_points, uniform_indices]))
+    def process_mask(self, mask_path: Path) -> bool:
+        """处理单个掩码文件，生成JSON和覆盖图（叠加原始PNG）"""
+        try:
+            mask_filename = mask_path.name
+            self.logger.info(f"处理掩码: {mask_filename}")
 
-                # 确保包含首尾点
-                if 0 not in all_indices:
-                    all_indices = np.insert(all_indices, 0, 0)
+            # 读取图像原始尺寸
+            size_info = self._get_image_size(mask_filename)
+            image_width = size_info["width"]
+            image_height = size_info["height"]
+            self.logger.debug(f"加载原始尺寸: {image_width}x{image_height}")
 
-                if len(contour) - 1 not in all_indices:
-                    all_indices = np.append(all_indices, len(contour) - 1)
+            # 读取掩码并二值化
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                raise ValueError(f"无法读取掩码文件: {mask_path}")
 
-                # 按索引提取点
-                simplified_contour = contour[np.sort(all_indices)]
+            _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
 
-                # 确保首尾点闭合
-                if len(simplified_contour) > 0 and not np.allclose(simplified_contour[0], simplified_contour[-1],
-                                                                   atol=1.0):
-                    simplified_contour = np.vstack([simplified_contour, simplified_contour[0]])
+            # 提取轮廓
+            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours = [cnt.squeeze(axis=1) for cnt in contours]
 
-        return simplified_contour
+            if not contours:
+                self.logger.warning(f"未检测到轮廓: {mask_filename}")
+                return False
 
-    def _create_overlay_image(self, contours, base_name, image_width, image_height):
-        """创建并保存带有轮廓叠加的图像"""
-        # 从掩码目录的上级目录查找RAW文件（适配seg_main.py的目录结构）
-        raw_dir = os.path.dirname(os.path.dirname(self.mask_dir))  # 调整路径层级适配整体流程
-        raw_path = os.path.join(raw_dir, "1_raw_png", f"{base_name}.raw")  # 假设RAW文件在1_raw_png目录
+            # 构建JSON数据
+            base_name = mask_path.stem
+            json_data = {
+                "version": "1.0.2.799",
+                "imagePath": base_name,
+                "imageData": None,
+                "flags": {},
+                "shapes": [],
+                "imageWidth": image_width,
+                "imageHeight": image_height
+            }
 
-        # 兼容原始路径查找逻辑
-        if not os.path.exists(raw_path):
-            raw_path = os.path.join(os.path.dirname(self.mask_dir), f"{base_name}.raw")
+            # 添加所有轮廓点
+            for contour in contours:
+                points = contour.tolist()
+                json_data["shapes"].append({
+                    "label": 1,
+                    "labelIndex": 0,
+                    "points": points,
+                    "shape_type": "polygon",
+                    "description": "",
+                    "mask": None,
+                    "group_id": None,
+                    "flags": {}
+                })
 
-        if os.path.exists(raw_path):
-            try:
-                raw_img = self.read_raw_image(raw_path, width=image_width, height=image_height)
-                if raw_img is None:
-                    return
+            # 保存JSON
+            json_path = self.output_path / f"{base_name}.json"
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"JSON已保存: {json_path}")
 
-                raw_8bit = self.convert_to_uint8(raw_img)
-                raw_color = cv2.cvtColor(raw_8bit, cv2.COLOR_GRAY2BGR)
+            # 生成覆盖图（叠加原始PNG图像）
+            self._create_overlay_image(contours, base_name)
 
-                # 转换轮廓为三维格式供OpenCV绘制
-                contours_3d = [cnt[:, np.newaxis, :] for cnt in contours]
-                cv2.drawContours(raw_color, contours_3d, -1, (0, 0, 255), 4)
+            return True
 
-                overlay_path = os.path.join(self.output_dir, f"{base_name}_contour_overlay.png")
-                cv2.imwrite(overlay_path, raw_color)
-                print(f"轮廓叠加图像已保存至: {overlay_path}")
-            except Exception as e:
-                print(f"生成叠加图像失败: {e}")
+        except Exception as e:
+            self.logger.error(f"处理 {mask_path.name} 失败: {str(e)}", exc_info=True)
+            return False
 
-    def process_dataset(self, max_points, simplify=True, tolerance=2.0, min_points=10):
-        """处理整个掩码数据集"""
-        # 收集所有掩码文件
+    def _create_overlay_image(self, contours: List[np.ndarray], base_name: str) -> None:
+        """创建轮廓叠加原始PNG的覆盖图"""
+        # 查找原始PNG图像
+        original_png = self._find_original_png(base_name)
+        if not original_png:
+            self.logger.warning(f"未找到原始PNG文件，跳过覆盖图生成: {base_name}.png")
+            return
+
+        try:
+            # 读取原始PNG并转换为彩色
+            original_img = cv2.imread(str(original_png))
+            if original_img is None:
+                self.logger.warning(f"无法读取原始PNG: {original_png}")
+                return
+
+            # 绘制轮廓（转换为3D格式）
+            contours_3d = [cnt[:, np.newaxis, :] for cnt in contours]
+            cv2.drawContours(original_img, contours_3d, -1, (0, 0, 255), 4)  # 红色轮廓，线宽4
+
+            # 保存覆盖图
+            overlay_path = self.output_path / f"{base_name}_contour_overlay.png"
+            cv2.imwrite(str(overlay_path), original_img)
+            self.logger.info(f"覆盖图已保存: {overlay_path}")
+
+        except Exception as e:
+            self.logger.error(f"生成覆盖图失败: {str(e)}")
+
+    def process(self) -> Dict[str, int]:
+        """处理输入路径（单文件或目录）"""
+        # 收集所有待处理的掩码文件
         mask_files = []
-        for root, _, files in os.walk(self.mask_dir):
-            for file in files:
-                if file.lower().endswith('mask.png'):
-                    mask_files.append(os.path.join(root, file))
+        if self.input_path.is_file():
+            if self.input_path.suffix.lower() == '.png':
+                mask_files = [self.input_path]
+            else:
+                self.logger.error("输入文件不是PNG格式")
+                return {"total": 0, "success": 0, "failed": 0}
+        else:
+            mask_files = list(self.input_path.glob("*.png"))
+            if not mask_files:
+                self.logger.warning(f"目录中未找到PNG文件: {self.input_path}")
+                return {"total": 0, "success": 0, "failed": 0}
 
-        processed_count = 0
+        self.logger.info(f"共发现 {len(mask_files)} 个掩码文件")
 
+        # 处理所有文件
+        success_count = 0
         for mask_file in mask_files:
-            try:
-                print(f"\n处理文件: {os.path.basename(mask_file)}")
-                self.process_mask(
-                    mask_file,
-                    max_points,
-                    simplify=simplify,
-                    tolerance=tolerance,
-                    min_points=min_points
-                )
-                processed_count += 1
-            except Exception as e:
-                print(f"处理文件 {mask_file} 时出错: {e}")
+            if self.process_mask(mask_file):
+                success_count += 1
 
-        print(f"处理完成! 共处理了 {processed_count} 个掩码图像")
+        result = {
+            "total": len(mask_files),
+            "success": success_count,
+            "failed": len(mask_files) - success_count
+        }
+        self.logger.info(f"处理完成 - 总计: {result['total']}, 成功: {result['success']}, 失败: {result['failed']}")
+        return result
 
 
 def main():
-    # 仅允许传递宽高参数，其他参数在main中写死
-    parser = argparse.ArgumentParser(description="将掩码转换为轮廓坐标JSON")
-    parser.add_argument("--mask-dir", required=True, help="掩码图像目录")
-    parser.add_argument("--output-dir", help="输出JSON和覆盖图的目录")
-    parser.add_argument("--width", "-w", type=int, required=True, help="图像宽度")
-    parser.add_argument("--height", "-h", type=int, required=True, help="图像高度")
+    # 配置日志
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    # 命令行参数
+    parser = argparse.ArgumentParser(description="将掩码转换为轮廓JSON（覆盖图叠加原始PNG）")
+    parser.add_argument('-i', '--input', required=True, help="输入掩码文件（.png）或目录")
+    parser.add_argument('-o', '--output', help="输出路径（默认与输入一致）")
+    parser.add_argument('-j', '--json', required=True, help="记录原始尺寸的JSON文件路径")
 
     args = parser.parse_args()
 
-    # 写死的参数
-    MAX_POINTS = 500
-    SIMPLIFY = False
-    TOLERANCE = 1.0
-    MIN_POINTS = 10
-
-    # 创建处理器并处理
-    processor = MaskProcessor(
-        mask_dir=args.mask_dir,
-        output_dir=args.output_dir,
-        image_width=args.width,
-        image_height=args.height
-    )
-    processor.process_dataset(
-        max_points=MAX_POINTS,
-        simplify=SIMPLIFY,
-        tolerance=TOLERANCE,
-        min_points=MIN_POINTS
-    )
+    # 初始化处理器并执行
+    try:
+        processor = MaskProcessor(
+            input_path=args.input,
+            output_path=args.output,
+            sizes_json_path=args.json
+        )
+        processor.process()
+    except Exception as e:
+        logging.error(f"处理失败: {str(e)}", exc_info=True)
+        exit(1)
 
 
 if __name__ == "__main__":

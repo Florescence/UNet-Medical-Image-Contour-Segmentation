@@ -14,7 +14,7 @@ def remove_internal_regions(mask, foreground_value=2, background_values=[0, 1]):
     Returns:
         处理后的掩码图像，值仍为[0,1,2]
     """
-    # 确保输入是numpy数组
+    # 确保输入是numpy数组o
     if not isinstance(mask, np.ndarray):
         mask = np.array(mask)
 
@@ -48,7 +48,7 @@ def remove_internal_regions(mask, foreground_value=2, background_values=[0, 1]):
     return processed_mask
 
 
-def postprocess_mask(mask, min_area=4000, morph_kernel_size=3):
+def postprocess_mask(mask, min_area=20000, morph_kernel_size=3):
     """
     完整的掩码后处理流程：去除内部区域+形态学操作（直接处理[0,1,2]格式掩码）
 

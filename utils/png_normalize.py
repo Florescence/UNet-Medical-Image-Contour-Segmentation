@@ -3,19 +3,21 @@ import logging
 import json
 from pathlib import Path
 from PIL import Image
-from typing import Dict
+from typing import Dict, Union
 
 
 class PngNormalizer:
-    """PNG图像归一化器 - 将图像无损缩放至指定尺寸并记录原始尺寸"""
+    """PNG图像归一化器 - 固定将图像缩放至512x512，支持单张/目录处理"""
 
-    def __init__(self, input_dir: str, output_dir: str,
-                 target_size: int = 512,
-                 original_sizes_json: str = None):
-        self.input_dir = input_dir
-        self.output_dir = output_dir
-        self.target_size = target_size
-        self.original_sizes_json = original_sizes_json
+    def __init__(self, input_path: str, output_path: str = None):
+        """
+        初始化归一化器
+        :param input_path: 输入图片路径（单张PNG）或目录路径
+        :param output_path: 输出路径（可选，默认与输入路径相同）
+        """
+        self.input_path = Path(input_path)
+        self.output_path = self._get_default_output_path(output_path)
+        self.target_size = 512  # 固定目标尺寸为512x512
         self.original_sizes = {}  # 存储原始尺寸信息
         self.logger = self._setup_logger()
 
@@ -30,6 +32,26 @@ class PngNormalizer:
         logger.addHandler(ch)
 
         return logger
+
+    def _get_default_output_path(self, output_path: Union[str, None]) -> Path:
+        """获取默认输出路径（与输入路径相同）"""
+        if output_path:
+            return Path(output_path)
+
+        # 若未指定输出路径，使用输入路径
+        if self.input_path.is_file():
+            return self.input_path.parent  # 单张图片：输出到同目录
+        else:
+            return self.input_path  # 目录：输出到自身目录
+
+    def _get_json_path(self) -> Path:
+        """获取原始尺寸JSON文件的默认路径"""
+        if self.input_path.is_file():
+            # 单张图片：JSON与图片同目录，以图片名为前缀
+            return self.output_path / f"{self.input_path.stem}_sizes.json"
+        else:
+            # 目录：JSON在输出目录下，命名为original_sizes.json
+            return self.output_path / "original_sizes.json"
 
     def _process_single_image(self, img_path: Path) -> bool:
         """处理单个图像文件"""
@@ -74,8 +96,8 @@ class PngNormalizer:
                 new_img.paste(resized_img, (paste_x, paste_y))
 
                 # 保存处理后的图像
-                output_path = Path(self.output_dir) / filename
-                new_img.save(output_path, "PNG", quality=100, compress_level=9)
+                output_img_path = self.output_path / filename
+                new_img.save(output_img_path, "PNG", quality=100, compress_level=9)
 
                 self.logger.info(
                     f"已处理: {filename} (原始尺寸: {original_width}x{original_height} -> 新尺寸: {self.target_size}x{self.target_size})")
@@ -87,29 +109,37 @@ class PngNormalizer:
 
     def _save_original_sizes(self) -> None:
         """保存原始尺寸信息到JSON文件"""
-        if not self.original_sizes_json or not self.original_sizes:
+        if not self.original_sizes:
+            self.logger.warning("没有需要保存的原始尺寸信息")
             return
 
+        json_path = self._get_json_path()
         try:
-            with open(self.original_sizes_json, 'w', encoding='utf-8') as f:
+            with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(self.original_sizes, f, ensure_ascii=False, indent=2)
-            self.logger.info(f"原始尺寸信息已保存至: {self.original_sizes_json}")
+            self.logger.info(f"原始尺寸信息已保存至: {json_path}")
         except Exception as e:
             self.logger.error(f"保存原始尺寸JSON失败: {e}", exc_info=True)
 
     def normalize(self) -> Dict[str, int]:
         """执行图像归一化处理"""
-        self.logger.info(f"开始图像归一化处理 - 输入目录: {self.input_dir}, 输出目录: {self.output_dir}")
-        self.logger.info(f"目标尺寸: {self.target_size}x{self.target_size}")
+        self.logger.info(f"开始图像归一化处理 - 目标尺寸: {self.target_size}x{self.target_size}")
+        self.logger.info(f"输入: {self.input_path}, 输出: {self.output_path}")
 
         # 确保输出目录存在
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        self.output_path.mkdir(parents=True, exist_ok=True)
 
-        # 获取所有PNG图片
-        png_files = list(Path(self.input_dir).glob("*.png"))
+        # 收集需要处理的图片
+        if self.input_path.is_file():
+            # 处理单张图片
+            png_files = [self.input_path] if self.input_path.suffix.lower() == '.png' else []
+        else:
+            # 处理目录下所有PNG
+            png_files = list(self.input_path.glob("*.png"))
+
         if not png_files:
-            self.logger.warning(f"在 {self.input_dir} 中未找到PNG图片")
-            return {"processed": 0, "failed": 0}
+            self.logger.warning(f"未找到PNG图片 (路径: {self.input_path})")
+            return {"processed": 0, "failed": 0, "total": 0}
 
         self.logger.info(f"找到 {len(png_files)} 张PNG图片")
 
@@ -138,20 +168,16 @@ class PngNormalizer:
 
 def main():
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description='将PNG图片无损缩放至指定尺寸并保存原始尺寸信息')
-    parser.add_argument('--input-dir', required=True, help='输入图片文件夹路径')
-    parser.add_argument('--output-dir', required=True, help='输出图片文件夹路径')
-    parser.add_argument('--target-size', type=int, default=512, help='目标尺寸（宽高相同，默认512）')
-    parser.add_argument('--original-sizes', required=True, help='保存原始尺寸信息的JSON文件路径')
+    parser = argparse.ArgumentParser(description='将PNG图片归一化至512x512并记录原始尺寸')
+    parser.add_argument('--input', help='输入PNG图片路径或包含PNG图片的目录', required=True)
+    parser.add_argument('--output', '-o', help='输出路径（可选，默认与输入路径相同）')
 
     args = parser.parse_args()
 
     # 创建归一化器实例并执行归一化
     normalizer = PngNormalizer(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        target_size=args.target_size,
-        original_sizes_json=args.original_sizes
+        input_path=args.input,
+        output_path=args.output
     )
 
     normalizer.normalize()

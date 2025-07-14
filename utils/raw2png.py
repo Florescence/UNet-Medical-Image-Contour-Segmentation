@@ -11,12 +11,12 @@ class RawToPngConverter:
 
     def __init__(self, input_path: str, output_dir: str = None,
                  width: int = None, height: int = None,
-                 window_center: int = None, window_width: int = None):
+                 window_length: int = None, window_width: int = None):
         self.input_path = input_path
         self.output_dir = output_dir or os.path.dirname(input_path)
         self.width = width
         self.height = height
-        self.window_center = window_center
+        self.window_length = window_length
         self.window_width = window_width
         self.logger = self._setup_logger()
 
@@ -58,8 +58,8 @@ class RawToPngConverter:
     def _apply_windowing(self, img_array: np.ndarray) -> np.ndarray:
         """应用窗宽窗位计算"""
         # 计算窗宽窗位的上下限
-        window_min = self.window_center - self.window_width // 2
-        window_max = self.window_center + self.window_width // 2
+        window_min = self.window_length - self.window_width // 2
+        window_max = self.window_length + self.window_width // 2
 
         # 裁剪到窗宽范围内
         img_clipped = np.clip(img_array, window_min, window_max)
@@ -103,7 +103,7 @@ class RawToPngConverter:
         failed_count = 0
 
         self.logger.info(f"开始转换：输入路径={self.input_path}，输出目录={self.output_dir}")
-        self.logger.info(f"图像尺寸：{self.width}x{self.height}，窗宽窗位：{self.window_center}/{self.window_width}")
+        self.logger.info(f"图像尺寸：{self.width}x{self.height}，窗宽窗位：{self.window_width}/{self.window_length}")
 
         # 处理单个文件
         if os.path.isfile(self.input_path) and self.input_path.lower().endswith('.raw'):
@@ -141,14 +141,18 @@ class RawToPngConverter:
 def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='将16-bit RAW图像转换为PNG格式')
-    parser.add_argument('input', help='输入RAW文件路径或包含RAW文件的目录')
-    parser.add_argument('--output', '-o', help='输出目录路径（默认与输入同目录）', default=None)
+    parser.add_argument('--input', required=True, help='输入RAW文件路径或包含RAW文件的目录')
+    parser.add_argument('--output', help='输出目录路径（默认与输入同目录）', default=None)
     parser.add_argument('--width', '-w', type=int, required=True, help='图像宽度（像素）')
-    parser.add_argument('--height', '-h', type=int, required=True, help='图像高度（像素）')
-    parser.add_argument('--center', '-c', type=int, required=True, help='窗位（window center）')
-    parser.add_argument('--width-window', '-ww', type=int, required=True, help='窗宽（window width）')
+    parser.add_argument('--height', type=int, required=True, help='图像高度（像素）')
+    parser.add_argument('--window-width', '-ww', type=int, required=True, help='窗宽（window width）')
+    parser.add_argument('--window-length', '-wl', type=int, required=True, help='窗位（window length）')
 
     args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        logging.error(f"输入路径不存在: {args.input}")
+        exit(1)
 
     # 创建转换器实例并执行转换
     converter = RawToPngConverter(
@@ -156,8 +160,8 @@ def main():
         output_dir=args.output,
         width=args.width,
         height=args.height,
-        window_center=args.center,
-        window_width=args.width_window
+        window_width=args.window_width,
+        window_length=args.window_length
     )
 
     converter.convert()

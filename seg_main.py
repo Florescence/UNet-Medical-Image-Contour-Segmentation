@@ -33,24 +33,26 @@ def create_work_dirs(root_dir):
 
 
 # 步骤1：RAW转PNG
-def step_raw_to_png(input_raw, width, height, output_png_dir, **raw_kwargs):
+def step_raw_to_png(input_raw, output_png_dir, width, height, window_width, window_length):
     logging.info("===== 开始步骤1：RAW转PNG =====")
     # 调用raw2png.py的命令行模式（确保raw2png.py支持命令行传参）
     cmd = [
         "python", "utils/raw2png.py",
-        input_raw,
-        "--output", output_png_dir,
+        "--input", str(input_raw),
+        "--output", str(output_png_dir),
         "--width", str(width),
         "--height", str(height),
-        "--percentile", str(raw_kwargs.get("percentile", 0.5))
+        "--window-width", str(window_width),
+        "--window-length", str(window_length)
     ]
-    if raw_kwargs.get("flip_vertical"):
-        cmd.append("--flip-vertical")
-    if raw_kwargs.get("flip_horizontal"):
-        cmd.append("--flip-horizontal")
 
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     logging.info(result.stdout)
+
+    if result.stderr:
+        logging.error(f"RAW转PNG错误: {result.stderr}")  # 打印错误输出
+    if result.returncode != 0:
+        raise RuntimeError(f"raw2png.py执行失败，返回码: {result.returncode}")
 
     if not os.listdir(output_png_dir):
         raise RuntimeError("步骤1未生成任何PNG文件，终止流程")
@@ -59,27 +61,25 @@ def step_raw_to_png(input_raw, width, height, output_png_dir, **raw_kwargs):
 
 
 # 步骤2：PNG归一化到512x512
-def step_normalize_png(input_png_dir, output_norm_dir, original_sizes_json, target_size=512):
+def step_normalize_png(input_png_dir, output_norm_dir):
     logging.info("===== 开始步骤2：PNG归一化到512x512 =====")
     # 调用png_normalize.py的命令行模式
     cmd = [
         "python", "utils/png_normalize.py",
-        "--input-dir", input_png_dir,
-        "--output-dir", output_norm_dir,
-        "--target-size", str(target_size),
-        "--original-sizes", original_sizes_json
+        "--input", str(input_png_dir),
+        "--output", str(output_norm_dir)
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     logging.info(result.stdout)
 
     if not os.listdir(output_norm_dir):
         raise RuntimeError("步骤2未生成任何归一化PNG，终止流程")
-    logging.info(f"步骤2完成：归一化PNG保存至 {output_norm_dir}，原始尺寸记录至 {original_sizes_json}")
-    return output_norm_dir, original_sizes_json
+    logging.info(f"步骤2完成：归一化PNG保存至 {output_norm_dir}")
+    return output_norm_dir
 
 
 # 步骤3：轮廓预测
-def step_predict_mask(input_norm_dir, output_pred_dir, model_path, classes, **predict_kwargs):
+def step_predict_mask(input_norm_dir, output_pred_dir, model_path):
     logging.info("===== 开始步骤3：轮廓预测 =====")
     # 收集归一化后的PNG文件
     norm_pngs = [os.path.join(input_norm_dir, f) for f in os.listdir(input_norm_dir) if f.endswith(".png")]
@@ -89,23 +89,10 @@ def step_predict_mask(input_norm_dir, output_pred_dir, model_path, classes, **pr
     # 调用predict.py的命令行模式
     cmd = [
         "python", "predict.py",
-        "--model", model_path,
-        "--input", *norm_pngs,
-        "--output",
-        *[os.path.join(output_pred_dir, f"{os.path.splitext(os.path.basename(f))[0]}_pred_mask.png") for f in
-          norm_pngs],
-        "--classes", str(classes),
-        "--mask-threshold", str(predict_kwargs.get("mask_threshold", 0.5)),
-        "--scale", str(predict_kwargs.get("scale", 0.5))
+        "--model", str(model_path),
+        "--input", str(input_norm_dir),
+        "--output", str(output_pred_dir),
     ]
-    if predict_kwargs.get("postprocess"):
-        cmd.extend([
-            "--postprocess",
-            "--min-area", str(predict_kwargs.get("min_area", 4000)),
-            "--morph-kernel", str(predict_kwargs.get("morph_kernel", 3))
-        ])
-    if predict_kwargs.get("bilinear"):
-        cmd.append("--bilinear")
 
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     logging.info(result.stdout)
@@ -122,9 +109,9 @@ def step_denormalize_mask(input_pred_dir, output_denorm_dir, original_sizes_json
     # 调用png_denormalize.py的命令行模式
     cmd = [
         "python", "utils/png_denormalize.py",
-        "--input-dir", input_pred_dir,
-        "--output-dir", output_denorm_dir,
-        "--original-sizes", original_sizes_json
+        "--input", str(input_pred_dir),
+        "--output", str(output_denorm_dir),
+        "--json", str(original_sizes_json)
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     logging.info(result.stdout)
@@ -136,15 +123,14 @@ def step_denormalize_mask(input_pred_dir, output_denorm_dir, original_sizes_json
 
 
 # 步骤5：Mask转Polygon（调用修改后的mask2polygon.py）
-def step_mask_to_polygon(input_denorm_mask_dir, output_json_dir, width, height):
+def step_mask_to_polygon(input_denorm_mask_dir, output_json_dir, original_sizes_json):
     logging.info("===== 开始步骤5：Mask转Polygon =====")
     # 调用mask2polygon.py的命令行模式（仅传递宽高参数）
     cmd = [
         "python", "utils/mask2polygon.py",
-        "--mask-dir", input_denorm_mask_dir,
-        "--output-dir", output_json_dir,
-        "--width", str(width),
-        "--height", str(height)
+        "--input", str(input_denorm_mask_dir),
+        "--output", str(output_json_dir),
+        "--json", str(original_sizes_json)
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     logging.info(result.stdout)
@@ -159,32 +145,22 @@ def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="端到端RAW图像轮廓提取流程")
     # 基础参数
-    parser.add_argument("input_raw", help="输入RAW文件路径或目录")
-    parser.add_argument("--output-root", "-o", default="./seg_results", help="输出结果根目录")
-    parser.add_argument("--width", "-w", type=int, required=True, help="RAW图像宽度")
-    parser.add_argument("--height", "-h", type=int, required=True, help="RAW图像高度")
-    parser.add_argument("--model", "-m", required=True, help="预测模型路径(.pth)")
+    parser.add_argument("--input-raw", help="输入RAW文件路径或目录")
+    parser.add_argument("--output-root", "-o", default="seg_results", help="输出结果根目录")
 
     # 步骤1参数（raw2png）
-    parser.add_argument("--raw-percentile", type=float, default=0.5, help="RAW转PNG的百分位数")
-    parser.add_argument("--flip-vertical", action="store_true", help="RAW转PNG时垂直翻转")
-    parser.add_argument("--flip-horizontal", action="store_true", help="RAW转PNG时水平翻转")
-
-    # 步骤2参数（归一化）
-    parser.add_argument("--norm-size", type=int, default=512, help="归一化目标尺寸")
-
-    # 步骤3参数（预测）
-    parser.add_argument("--classes", "-c", type=int, default=3, help="预测类别数")
-    parser.add_argument("--postprocess", "-p", action="store_true", help="预测后处理")
-    parser.add_argument("--mask-threshold", type=float, default=0.5, help="预测掩码阈值")
-    parser.add_argument("--min-area", type=int, default=4000, help="后处理最小连通域面积")
-    parser.add_argument("--morph-kernel", type=int, default=3, help="后处理形态学核大小")
+    parser.add_argument("--width", type=int, required=True, help="RAW图像宽度")
+    parser.add_argument("--height", type=int, required=True, help="RAW图像高度")
+    parser.add_argument("--window-width", "-ww", type=int, required=True, help="RAW<UNK>")
+    parser.add_argument("--window-length", "-wl", type=int, required=True, help="RAW<UNK>")
+    parser.add_argument("--model", "-m", required=True, help="预测模型路径(.pth)")
 
     args = parser.parse_args()
 
     # 创建工作目录
     work_dirs = create_work_dirs(args.output_root)
-    original_sizes_json = os.path.join(args.output_root, "original_sizes.json")  # 原始尺寸记录文件
+    print(work_dirs["raw_png"])
+    original_sizes_json = os.path.join(work_dirs["normalized_png"], "original_sizes.json")  # 原始尺寸记录文件
 
     try:
         # 执行流程
@@ -193,40 +169,31 @@ def main():
             width=args.width,
             height=args.height,
             output_png_dir=work_dirs["raw_png"],
-            percentile=args.raw_percentile,
-            flip_vertical=args.flip_vertical,
-            flip_horizontal=args.flip_horizontal
+            window_width=args.window_width,
+            window_length=args.window_length,
         )
 
-        norm_png_dir, sizes_json = step_normalize_png(
+        norm_png_dir = step_normalize_png(
             input_png_dir=raw_png_dir,
-            output_norm_dir=work_dirs["normalized_png"],
-            original_sizes_json=original_sizes_json,
-            target_size=args.norm_size
+            output_norm_dir=work_dirs["normalized_png"]
         )
 
         pred_mask_dir = step_predict_mask(
             input_norm_dir=norm_png_dir,
             output_pred_dir=work_dirs["pred_masks"],
-            model_path=args.model,
-            classes=args.classes,
-            postprocess=args.postprocess,
-            mask_threshold=args.mask_threshold,
-            min_area=args.min_area,
-            morph_kernel=args.morph_kernel
+            model_path=args.model
         )
 
         denorm_mask_dir = step_denormalize_mask(
             input_pred_dir=pred_mask_dir,
             output_denorm_dir=work_dirs["denormalized_masks"],
-            original_sizes_json=sizes_json
+            original_sizes_json=original_sizes_json
         )
 
         json_result_dir = step_mask_to_polygon(
             input_denorm_mask_dir=denorm_mask_dir,
             output_json_dir=work_dirs["json_results"],
-            width=args.width,  # 传递宽高参数到mask2polygon
-            height=args.height
+            original_sizes_json=original_sizes_json
         )
 
         logging.info("===== 全流程完成 =====")

@@ -8,3 +8,4 @@ torch~=2.7.1+cu126
 opencv-python~=4.11.0.86
 scipy~=1.13.1
 torchvision~=0.22.1+cu126
+imageio~=2.33.1
