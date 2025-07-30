@@ -1,4 +1,4 @@
-""" Parts of the U-Net model with Spatial Attention """
+""" Parts of the U-Net++ model with Spatial Attention """
 
 import torch
 import torch.nn as nn
@@ -59,42 +59,50 @@ class SpatialAttention(nn.Module):
         # 应用sigmoid激活函数
         return self.sigmoid(out)
 
-class Up(nn.Module):
-    """Upscaling then double conv with Spatial Attention"""
+class NestedUp(nn.Module):
+    """U-Net++ 中的嵌套上采样模块，支持多跳跃连接和空间注意力"""
 
-    def __init__(self, in_channels, out_channels, bilinear=True, use_attention=False):
+    def __init__(self, in_channels, skip_channels, out_channels, bilinear=True, use_attention=False):
         super().__init__()
-
-        # 上采样部分
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
-
-        # 是否使用空间注意力
         self.use_attention = use_attention
         self.attention = SpatialAttention() if use_attention else nn.Identity()
 
-    def forward(self, x1, x2):
+        # 上采样层配置（核心修正：确保通道数匹配）
+        if bilinear:
+            # 双线性上采样：输出通道数为 out_channels
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            # 拼接后的通道数 = 上采样输出通道数 + 所有跳跃连接通道数总和
+            self.conv = DoubleConv(out_channels + skip_channels, out_channels)
+        else:
+            # 转置卷积上采样：输入通道=in_channels，输出通道=out_channels
+            self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+            # 拼接后的通道数 = 上采样输出通道数（out_channels） + 所有跳跃连接通道数总和（skip_channels）
+            self.conv = DoubleConv(out_channels + skip_channels, out_channels)
+
+    def forward(self, x, skip_connections):
+        """
+        x: 解码器当前层的输入特征（来自更深层的输出）
+        skip_connections: 编码器对应的多层跳跃连接特征列表
+        """
         # 上采样
-        x1 = self.up(x1)
+        x = self.up(x)
 
-        # 处理尺寸不匹配问题
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2])
+        # 对每个跳跃连接应用空间注意力，并处理尺寸不匹配
+        attended_skips = []
+        for skip in skip_connections:
+            # 应用注意力
+            attended_skip = self.attention(skip) * skip
+            # 对齐尺寸
+            diffY = attended_skip.size()[2] - x.size()[2]
+            diffX = attended_skip.size()[3] - x.size()[3]
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2,
+                          diffY // 2, diffY - diffY // 2])
+            attended_skips.append(attended_skip)
 
-        # 应用空间注意力（如果启用）
-        if self.use_attention:
-            x2 = x2 * self.attention(x2)
+        # 拼接上采样特征和所有跳跃连接特征
+        x = torch.cat([x] + attended_skips, dim=1)
 
-        # 拼接特征
-        x = torch.cat([x2, x1], dim=1)
-
-        # 通过双卷积层
+        # 双卷积融合
         return self.conv(x)
 
 class OutConv(nn.Module):

@@ -101,8 +101,10 @@ def evaluate(net, dataloader, device, amp, epoch_pred_dir=None, postprocess=True
                         if postprocess:
                             post_np = mask_pred_postprocessed[i].cpu().numpy()
                             post_save_path = os.path.join(postprocessed_dir, f'pred_batch{batch_index}_sample{i}.png')
-                            post_png = (post_np * 255).astype(np.uint8)
-                            Image.fromarray(post_png).save(post_save_path)
+                            post_vis = np.zeros_like(post_np, dtype=np.uint8)
+                            post_vis[post_np == 0] = 0
+                            post_vis[post_np == 1] = 255
+                            Image.fromarray(post_vis).save(post_save_path)
 
             else:
                 # 多分类处理

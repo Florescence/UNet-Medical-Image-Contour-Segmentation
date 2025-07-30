@@ -12,11 +12,14 @@ from tqdm import tqdm
 
 from evaluate import evaluate
 from unet import UNet_S, UNet
-from unet.unet_model import UNet_SA
+from unet.unet_model import UNet_SA, UNet_T
+from unet.unet_nested_model import UNetPlusPlus_S, UNetPlusPlus
+from utils.boundary_loss import boundary_loss
+from yolo.yolov8_seg_model import YOLOv8_Seg_S
 from utils.data_loading import BasicDataset
 from utils.dice_score import dice_loss
 
-data_root = Path('data/data-3-classes')
+data_root = Path('data/data-without-black-shadow')
 dir_checkpoint = Path('./checkpoints/')
 dir_img_train = data_root / 'imgs/train'
 dir_img_val = data_root / 'imgs/val'
@@ -128,8 +131,7 @@ def train_model(
                         # )
                         # loss += cc_loss
                         # 计算边界损失
-                        # if epoch > epochs / 2:
-                        #     loss += 0.2 * boundary_loss(masks_pred.squeeze(1), true_masks.float(), edge_width=51, edge_weight=7)
+                        loss += 0.25 * boundary_loss(masks_pred.squeeze(1), true_masks.float(), edge_width=51, edge_weight=15)
 
                     else:
                         loss = criterion(masks_pred, true_masks)
@@ -204,8 +206,8 @@ def train_model(
                         #     pass
 
         if save_checkpoint:
-            factor = 1 # 保存频率
-            if epoch > epochs * 0.2:
+            factor = 5 # 保存频率
+            if epoch > epochs * 0.5: # 开始保存位置
                 if epoch % factor == 0:
                     Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
                     state_dict = model.state_dict()
@@ -245,18 +247,30 @@ if __name__ == '__main__':
     # 修改此处以适配数据类型
     # 对于RGB图像设置n_channels=3
     # n_classes=每个像素点有几个概率值
-    # 轻量化UNet
+    # # 微缩版UNet (1ms)
+    # model = UNet_T(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    # 轻量化UNet (5ms)
     model = UNet_S(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
-    # # 标准Unet
+    # # 标准Unet (40ms)
     # model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
-    # # UNet + 空间注意力
+    # # UNet_S + 空间注意力
     # model = UNet_SA(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    # # UNet++
+    # model = UNetPlusPlus(n_channels=1, n_classes=1, bilinear=args.bilinear)
+    # # Yolov8-seg-S，仅二分类 (5ms)
+    # model = YOLOv8_Seg_S(n_channels=1, n_classes=1)
     model = model.to(memory_format=torch.channels_last)
 
+    # # UNet
+    # logging.info(f'Network:\n'
+    #              f'\t{model.n_channels} input channels\n'
+    #              f'\t{model.n_classes} output channels (classes)\n'
+    #              f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
+
+    # YOLO
     logging.info(f'Network:\n'
                  f'\t{model.n_channels} input channels\n'
-                 f'\t{model.n_classes} output channels (classes)\n'
-                 f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
+                 f'\t{model.n_classes} output channels (classes)\n')
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)

@@ -48,7 +48,7 @@ def remove_internal_regions(mask, foreground_value=2, background_values=[0, 1]):
     return processed_mask
 
 
-def postprocess_mask(mask, min_area=20000, morph_kernel_size=3):
+def postprocess_mask(mask, min_area=15000, morph_kernel_size=3):
     """
     完整的掩码后处理流程：去除内部区域+形态学操作（直接处理[0,1,2]格式掩码）
 

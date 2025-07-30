@@ -10,5 +10,4 @@ wandb/
 /utils/test_export.py
 /utils/unet_model.pt
 seg_results/
-scripts/
 predictions/
